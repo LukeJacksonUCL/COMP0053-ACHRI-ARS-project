@@ -1,0 +1,17 @@
+# Data files (Exclude the dataset folders)
+train/
+validation/
+*.mat
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+
+# IDE/System files
+.vscode/
+.idea/
+.DS_Store
