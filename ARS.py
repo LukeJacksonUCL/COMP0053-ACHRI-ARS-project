@@ -73,76 +73,90 @@ def calculate_angle(joint_coords, idx_a, idx_vertex, idx_c):
     return np.degrees(angle) #return angle in degrees
 
 def extract_kinematic_features(window):
-    """
-    Processes a window of data (e.g., 180 frames) to extract mean angles.
-    """
-    angles = []
-    for row in window:
-        joints = get_joint_coords(row)
-        #example - calculate the angle of a knee, will need to map the indices based on Figure 1 in the README
-        knee_angle = calculate_angle(joints, idx_a=15, idx_vertex=16, idx_c=17) 
-        angles.append(knee_angle)
-    
-    #feature extraction - return mean and standard deviation of the angle to capture movement range and stiffness
-    return {
-        'mean_angle': np.mean(angles),
-        'std_angle': np.std(angles)
+    #Convert window into (Time, 22, 3) coordinate tensor
+    coords = np.array([get_joint_coords(row) for row in window])
+    features = {}
+
+    #Define angles based on Figure 1 mapping (format: { 'name': (point_a, vertex, point_b) })
+    angle_map = {
+        'trunk_flexion': (8, 7, 0),
+        'left_knee': (1, 2, 3),
+        'right_knee': (4, 5, 6),
+        'left_hip': (0, 1, 2),
+        'right_hip': (0, 4, 5),
+        'neck_flexion': (8, 19, 20)
     }
+    for name, (a, v, b) in angle_map.items():
+        # Calculate angle for every frame in window
+        angles = [calculate_angle(c, a, v, b) for c in coords]
+        features[f'{name}_mean'] = np.mean(angles)
+        features[f'{name}_std'] = np.std(angles) # Higher std = more movement fluidity
+
+    #Velocity & Acceleration (using head and lumbar)
+    for joint_idx, label in [(21, 'head'), (0, 'lumbar')]:
+        pos = coords[:, joint_idx, :]
+        vel = np.diff(pos, axis=0)
+        vel_mag = np.linalg.norm(vel, axis=1)
+        features[f'{label}_vel_avg'] = np.mean(vel_mag)
+        accel = np.diff(vel, axis=0)
+        accel_mag = np.linalg.norm(accel, axis=1)
+        features[f'{label}_accel_max'] = np.max(accel_mag)
+
+    #Posture: Trunk Length (Distance between Node 1 and Node 9) (consider normalising using total height if variance is too wide)
+    #Detects support/bracing protective behaviour
+    trunk_lengths = np.linalg.norm(coords[:, 8, :] - coords[:, 0, :], axis=1)
+    features['trunk_length_mean'] = np.mean(trunk_lengths)
+
+    return features
 
 def extract_emg_features(window):
-    """
-    Extracts RMS features for the 4 EMG channels.
-    Columns 67-70 (Indices 66-69).
-    """
-    #extract EMG columns
+    #Columns 67-70 are indices 66-69 
     emg_data = window[:, 66:70] 
+    rms = np.sqrt(np.mean(np.square(emg_data), axis=0)) #Standard RMS
     
-    #calculate RMS for each channel
-    rms_features = np.sqrt(np.mean(np.square(emg_data), axis=0))
-    
+    #Waveform Length - sum of absolute differences between consecutive samples
+    wl = np.sum(np.abs(np.diff(emg_data, axis=0)), axis=0)
     return {
-        'lumbar_R_rms': rms_features[0],
-        'lumbar_L_rms': rms_features[1],
-        'trapezius_R_rms': rms_features[2],
-        'trapezius_L_rms': rms_features[3]
+        'lumbar_R_rms': rms[0], 'lumbar_R_wl': wl[0],
+        'lumbar_L_rms': rms[1], 'lumbar_L_wl': wl[1],
+        'trapezius_R_rms': rms[2], 'trapezius_R_wl': wl[2],
+        'trapezius_L_rms': rms[3], 'trapezius_L_wl': wl[3]
     }
 
-if __name__ == "__main__": #test main function to ensure feature extraction works
+if __name__ == "__main__": #main function just to test if everything is working
     import glob
-
     #test file loading
-    print("---Data Loading---")
+    print("Data Loading")
     train_files = glob.glob("train/*.mat")
-    
     if not train_files:
-        print("Error: No .mat files found in 'train/' folder")
+        print("Error: No .mat files found in 'train/' folder.")
     else:
         sample_path = train_files[0]
         print(f"Loading sample file: {sample_path}")
-        
-        #load .mat file
         mat_data = loadmat(sample_path)
         matrix = mat_data.get('data') 
-        print(f"Matrix shape: {matrix.shape}") #should be (N, 78)
-        if matrix.shape[1] != 78:
-            print(f"Warning: Expected 78 columns, found {matrix.shape[1]}.")
+        print(f"Matrix shape: {matrix.shape} (N x 78 expected)") 
 
-        #test feature extraction on first 180 frames (3 sec)
+        #test feature extraction on first 180 frames
         print("\n---Feature Extraction---")
         if len(matrix) >= 180:
             test_window = matrix[0:180, :]
             
             #kinematic test
             k_feats = extract_kinematic_features(test_window)
-            print(f"Kinematic Features: {k_feats}")
+            print(f"Kinematic Features ({len(k_feats)} extracted), printing first 5:")
+            for key, val in list(k_feats.items())[:5]: #just printing first 5 for more concise test output
+                print(f"  - {key}: {val:.4f}")
             
             #EMG test
             e_feats = extract_emg_features(test_window)
-            print(f"EMG Features: {e_feats}")
+            print(f"\nEMG Features ({len(e_feats)} extracted):")
+            for key, val in e_feats.items():
+                print(f"  - {key}: {val:.4f}")
             
             #fusion check
             combined_vector = list(k_feats.values()) + list(e_feats.values())
-            print(f"\nFused Feature Vector Length: {len(combined_vector)}")
+            print(f"\nTotal Fused Feature Vector Length: {len(combined_vector)}")
             print("Successfully processed one window")
         else:
             print("File too short for full window.")
