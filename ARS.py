@@ -2,6 +2,8 @@ import os
 import numpy as np
 import pandas as pd
 from scipy.io import loadmat
+from scipy.signal import butter, filtfilt, welch
+
 
 def load_emopain_data(data_dir):
     """
@@ -24,6 +26,22 @@ def load_emopain_data(data_dir):
                     'filename': file
                 })
     return data_list
+
+
+def butter_bandpass_filter(data, lowcut, highcut, fs, order=4):
+    """
+    Implements a 4th-order Butterworth bandpass filter.
+    Uses filtfilt for zero-phase filtering to prevent phase shift in time-series signals.
+    """
+    nyq = 0.5 * fs  # Nyquist frequency
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
+    # axis=0 ensures filtering along the time axis (for each column)
+    y = filtfilt(b, a, data, axis=0)
+    return y
+
+
 
 
 def create_windows(matrix, window_size=180, overlap=0.75):
@@ -109,18 +127,55 @@ def extract_kinematic_features(window):
 
     return features
 
-def extract_emg_features(window):
-    #Columns 67-70 are indices 66-69 
+def extract_emg_features(window, fs=60): 
+    """
+    Extracts EMG time-domain and frequency-domain features.
+    Includes bandpass filtering preprocessing.
+    """
+    # Columns 67-70 are indices 66-69 (4 EMG channels)
     emg_data = window[:, 66:70] 
-    rms = np.sqrt(np.mean(np.square(emg_data), axis=0)) #Standard RMS
     
-    #Waveform Length - sum of absolute differences between consecutive samples
-    wl = np.sum(np.abs(np.diff(emg_data, axis=0)), axis=0)
+    # 1. Signal filtering preprocessing
+    try:
+        emg_filtered = butter_bandpass_filter(emg_data, lowcut=10.0, highcut=29.0, fs=fs)
+    except Exception as e:
+        print(f"Filtering failed, skipping: {e}")
+        emg_filtered = emg_data  
+
+    # 2. Time-Domain Features (RMS and Waveform Length)
+    rms = np.sqrt(np.mean(np.square(emg_filtered), axis=0)) 
+    wl = np.sum(np.abs(np.diff(emg_filtered, axis=0)), axis=0)
+    
+    # 3. Frequency-Domain Features (Median Frequency & Mean Frequency)
+    mdf = np.zeros(4) # Median Frequency
+    mnf = np.zeros(4) # Mean Frequency
+    
+    # Calculate PSD and frequency features for each of the 4 channels
+    for i in range(4):
+        channel_data = emg_filtered[:, i]
+        # Welch's method to compute Power Spectral Density (PSD)
+        # nperseg defines the length of each segment for the FFT
+        freqs, psd = welch(channel_data, fs=fs, nperseg=min(len(channel_data), fs))
+        
+        total_power = np.sum(psd)
+        if total_power == 0:
+            mdf[i], mnf[i] = 0, 0
+            continue
+            
+        # Mean Frequency (MNF): Sum of (frequency * power) / total power
+        mnf[i] = np.sum(freqs * psd) / total_power
+        
+        # Median Frequency (MDF): Frequency that divides the power spectrum in half
+        cumulative_power = np.cumsum(psd)
+        median_idx = np.where(cumulative_power >= total_power / 2)[0][0]
+        mdf[i] = freqs[median_idx]
+
+    # 4. Return all features dictionary
     return {
-        'lumbar_R_rms': rms[0], 'lumbar_R_wl': wl[0],
-        'lumbar_L_rms': rms[1], 'lumbar_L_wl': wl[1],
-        'trapezius_R_rms': rms[2], 'trapezius_R_wl': wl[2],
-        'trapezius_L_rms': rms[3], 'trapezius_L_wl': wl[3]
+        'lumbar_R_rms': rms[0], 'lumbar_R_wl': wl[0], 'lumbar_R_mdf': mdf[0], 'lumbar_R_mnf': mnf[0],
+        'lumbar_L_rms': rms[1], 'lumbar_L_wl': wl[1], 'lumbar_L_mdf': mdf[1], 'lumbar_L_mnf': mnf[1],
+        'trapezius_R_rms': rms[2], 'trapezius_R_wl': wl[2], 'trapezius_R_mdf': mdf[2], 'trapezius_R_mnf': mnf[2],
+        'trapezius_L_rms': rms[3], 'trapezius_L_wl': wl[3], 'trapezius_L_mdf': mdf[3], 'trapezius_L_mnf': mnf[3]
     }
 
 if __name__ == "__main__": #main function just to test if everything is working
